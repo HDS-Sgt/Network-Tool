@@ -28,6 +28,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FLOW_DIR = os.environ.get("FLOW_DIR") or HERE
+PROC_ROOT = os.environ.get("PROC_ROOT") or "/proc"   # 便于用假 /proc 测试 inode→pid
 API = (os.environ.get("CLASH_API") or "http://127.0.0.1:9090").rstrip("/")
 FLOWS = os.path.join(FLOW_DIR, "flows.jsonl")
 STATE = os.path.join(FLOW_DIR, "flow_state.json")
@@ -87,6 +88,113 @@ def ss_proc_map():
     return m
 
 
+def ss_tcp_sockets():
+    """所有 TCP socket 的地址与内核字节计数(`ss -tineH`,CapEff=0 也能读到)。
+
+    ss 每个 socket 输出两行:第一行 State/Recv-Q/Send-Q/本地/对端/uid/inode/计时器,
+    缩进的第二行才是 tcp_info,里面有 bytes_sent / bytes_received(socket 生命周期累计)。
+    """
+    try:
+        out = subprocess.run(["ss", "-tineH"], capture_output=True, text=True,
+                             timeout=10).stdout
+    except Exception:
+        return []
+    socks, cur = [], None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            f = line.split()
+            if len(f) < 5:
+                cur = None
+                continue
+            local, peer = f[3], f[4]
+            m = re.search(r"\bino:(\d+)", line)
+            cur = {"state": f[0], "local": local, "peer": peer,
+                   "port": local.rsplit(":", 1)[-1] if ":" in local else "",
+                   "ino": int(m.group(1)) if m else 0, "sent": 0, "recv": 0}
+            socks.append(cur)
+        elif cur is not None:
+            for name, key in (("bytes_sent", "sent"), ("bytes_received", "recv")):
+                m = re.search(name + r":(\d+)", line)
+                if m:
+                    cur[key] = int(m.group(1))
+    return socks
+
+
+def inode_owner_map(inodes):
+    """inode -> pid:扫 PROC_ROOT/<pid>/fd 里形如 `socket:[inode]` 的符号链接。"""
+    want = {"socket:[%d]" % int(i) for i in inodes if i}
+    owners = {}
+    if not want:
+        return owners
+    try:
+        pids = [d for d in os.listdir(PROC_ROOT) if d.isdigit()]
+    except Exception:
+        return owners
+    for ps in pids:
+        fd_dir = os.path.join(PROC_ROOT, ps, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except Exception:
+            continue
+        for fd in fds:
+            try:
+                tgt = os.readlink(os.path.join(fd_dir, fd))
+            except Exception:
+                continue
+            if tgt in want:
+                try:
+                    owners[int(tgt[8:-1])] = int(ps)
+                except ValueError:
+                    pass
+    return owners
+
+
+def direct_recs(socks, owners, proxied_ports, st, now):
+    """直连 = 本地端口不在 Clash 已代理的 sourcePort 里、对端不是回环、属主不是 clash。"""
+    dst = st.get("__direct__") or {}
+    out, live = [], set()
+    for s in socks:
+        port, ino, peer = s["port"], s["ino"], s["peer"]
+        if not port or port in proxied_ports:
+            continue
+        if (peer.startswith("127.") or peer.startswith("[::1]")
+                or peer.startswith("[::ffff:127.")):
+            continue
+        pid = owners.get(ino, 0)
+        tgid, proc, comm, cmd = 0, "", "", ""
+        if pid:
+            tgid, comm, cmd = proc_info(pid)
+            low = (comm + " " + cmd).lower()
+            if "clash" in low or "mihomo" in low:
+                continue      # Clash 自己的出口 socket,这部分已由 /connections 记账
+            proc = label_of(comm, cmd) or comm
+        key = str(ino) if ino else "%s/%s" % (port, peer)
+        live.add(key)
+        prev = dst.get(key) or {}
+        up, down = int(s["sent"]), int(s["recv"])
+        d_up = up - int(prev.get("up") or 0) if prev else up
+        d_dn = down - int(prev.get("down") or 0) if prev else down
+        if d_up < 0 or d_dn < 0:      # 端口/inode 被复用:按新 socket 算全量
+            d_up, d_dn = up, down
+        dst[key] = {"up": up, "down": down, "ts": now}
+        if d_up <= 0 and d_dn <= 0:
+            continue
+        out.append({
+            "proc": proc, "proc_src": "ss" if proc else "",
+            "pid": pid, "tgid": tgid, "comm": comm, "cmd": cmd,
+            "local_port": port, "peer": peer,
+            "remote_ip": peer.rsplit(":", 1)[0].strip("[]"),
+            "up": d_up, "down": d_dn, "ino": ino,
+        })
+    for key in list(dst):
+        if key not in live and now - int(dst[key].get("ts") or 0) > PRUNE_SEC:
+            del dst[key]
+    st["__direct__"] = dst
+    return out
+
+
 def label_of(comm, cmd):
     """comm 可能是线程名(main / MainThread / node 的线程…),用 cmdline 拼一个看得懂的名字。"""
     generic = {"", "main", "MainThread", "Thread", "python3", "python", "node", "java",
@@ -112,7 +220,7 @@ def proc_info(pid):
     返回 (tgid, comm, cmdline)。"""
     tgid = pid
     try:
-        with open("/proc/%d/status" % pid) as fh:
+        with open(os.path.join(PROC_ROOT, str(pid), "status")) as fh:
             for line in fh:
                 if line.startswith("Tgid:"):
                     tgid = int(line.split()[1])
@@ -121,12 +229,12 @@ def proc_info(pid):
         pass
     comm = cmd = ""
     try:
-        with open("/proc/%d/comm" % tgid) as fh:
+        with open(os.path.join(PROC_ROOT, str(tgid), "comm")) as fh:
             comm = fh.read().strip()
     except Exception:
         pass
     try:
-        with open("/proc/%d/cmdline" % tgid, "rb") as fh:
+        with open(os.path.join(PROC_ROOT, str(tgid), "cmdline"), "rb") as fh:
             cmd = " ".join(x.decode("utf-8", "replace")
                            for x in fh.read().split(b"\x00") if x)[:160]
     except Exception:
@@ -218,20 +326,32 @@ def snapshot():
             "up": d_up, "down": d_dn,
         })
     # 清理长时间没出现的连接
+    proxied = {str((c.get("metadata") or {}).get("sourcePort") or "") for c in conns}
+    proxied.discard("")
+    socks = ss_tcp_sockets()
+    owners = inode_owner_map({s["ino"] for s in socks if s["ino"]})
+    direct = direct_recs(socks, owners, proxied, st, now)
     for cid in list(st):
+        if cid == "__direct__":
+            continue
         if cid not in live and now - int(st[cid].get("ts") or 0) > PRUNE_SEC:
             del st[cid]
     save_json(STATE, st)
-    return recs, {"ss_sockets": len(pmap), "live_conns": len(conns)}
+    return recs, {"ss_sockets": len(pmap), "live_conns": len(conns),
+                  "direct": direct, "direct_sockets": len(socks),
+                  "direct_attributed": bool(owners)}
 
 
 def cmd_sample():
     recs, meta = snapshot()
+    direct = meta["direct"]
     rec = {
         "ts": int(time.time()),
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "ss_sockets": meta["ss_sockets"], "live_conns": meta["live_conns"],
         "attributed": any(r["proc"] for r in recs),
+        "direct": direct, "direct_conns": len(direct),
+        "direct_attributed": meta["direct_attributed"],
         "iface": iface_totals(),
         "conns": recs,
     }
@@ -239,8 +359,11 @@ def cmd_sample():
     with open(FLOWS, "a") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     tot_dn = sum(r["down"] for r in recs)
+    d_up = sum(r["up"] for r in direct)
+    d_dn = sum(r["down"] for r in direct)
     print(f"[flow] {rec['iso']} 连接={meta['live_conns']} 差量条目={len(recs)} "
           f"+{sum(r['up'] for r in recs)/1024:.1f}KiB/-{tot_dn/1024:.1f}KiB "
+          f"直连={len(direct)} 条 +{d_up/1024:.1f}KiB/-{d_dn/1024:.1f}KiB "
           f"进程名={'有(' + str(meta['ss_sockets']) + ' 个 socket)' if meta['ss_sockets'] else '无(不在宿主命名空间)'}"
           f" -> {FLOWS}")
 
@@ -275,7 +398,7 @@ def cmd_report(top=15, as_json=False):
         return 1
     by_proc, by_site, by_host, by_rule = {}, {}, {}, {}
     for rec in flows:
-        for r in rec["conns"]:
+        for r in rec.get("conns") or []:
             dn, up = r["down"], r["up"]
             pk = r["proc"] or "(未归因)"
             for key, node in ((pk, by_proc), (r["site"], by_site), (r["host"] or "(空)", by_host),
@@ -287,7 +410,7 @@ def cmd_report(top=15, as_json=False):
     # 进程 × 网站
     by_pairs = {}
     for rec in flows:
-        for r in rec["conns"]:
+        for r in rec.get("conns") or []:
             k = (r["proc"] or "(未归因)", r["site"])
             d = by_pairs.setdefault(k, {"up": 0, "down": 0, "conns": 0})
             d["up"] += r["up"]; d["down"] += r["down"]; d["conns"] += 1
@@ -297,6 +420,24 @@ def cmd_report(top=15, as_json=False):
         if "chrom" in pk.lower():
             d = chrome_sites.setdefault(site, {"up": 0, "down": 0, "conns": 0})
             d["up"] += v["up"]; d["down"] += v["down"]; d["conns"] += v["conns"]
+    # 直连 TCP(不经 Clash):单独一张表,再并进「全部进程」
+    by_proc_direct, direct_totals = {}, {"up": 0, "down": 0, "conns": 0}
+    for rec in flows:
+        for r in rec.get("direct") or []:
+            pk = r.get("proc") or "(未归因)"
+            d = by_proc_direct.setdefault(pk, {"up": 0, "down": 0, "conns": 0, "cmd": ""})
+            d["up"] += r["up"]; d["down"] += r["down"]; d["conns"] += 1
+            if not d["cmd"] and r.get("cmd"):
+                d["cmd"] = r["cmd"]
+            direct_totals["up"] += r["up"]; direct_totals["down"] += r["down"]
+            direct_totals["conns"] += 1
+    by_proc_all = {}
+    for src in (by_proc, by_proc_direct):
+        for k, v in src.items():
+            d = by_proc_all.setdefault(k, {"up": 0, "down": 0, "conns": 0, "cmd": ""})
+            d["up"] += v["up"]; d["down"] += v["down"]; d["conns"] += v["conns"]
+            if not d["cmd"] and v.get("cmd"):
+                d["cmd"] = v["cmd"]
     ts = [r["ts"] for r in flows if r.get("ts")]
     iface = {}
     for rec in flows:
@@ -316,6 +457,9 @@ def cmd_report(top=15, as_json=False):
         "by_process": by_proc, "by_site": by_site, "by_host": by_host, "by_rule": by_rule,
         "by_process_site": {f"{k[0]} @ {k[1]}": v for k, v in by_pairs.items()},
         "chrome_sites": chrome_sites,
+        "by_process_direct": by_proc_direct,
+        "by_proc_all": by_proc_all,
+        "direct_totals": direct_totals,
         "iface_delta": iface_delta,
     }
     save_json(REPORT, rep)
@@ -324,7 +468,10 @@ def cmd_report(top=15, as_json=False):
         return 0
     w = rep["window"]
     print(f"窗口 {w['start']}–{w['end']} ({w['samples']} 次采样)  "
-          f"合计 ↑{human(rep['totals']['up'])} ↓{human(rep['totals']['down'])}")
+          f"代理合计 ↑{human(rep['totals']['up'])} ↓{human(rep['totals']['down'])}")
+    if direct_totals["conns"]:
+        print(f"                            直连合计 ↑{human(direct_totals['up'])} "
+              f"↓{human(direct_totals['down'])} ({direct_totals['conns']} 条 socket)")
     def table(title, node, n=top, show_cmd=False):
         rows = sorted(node.items(), key=lambda kv: kv[1]["down"], reverse=True)[:n]
         print(f"\n== {title} (按下载量) ==")
@@ -337,6 +484,11 @@ def cmd_report(top=15, as_json=False):
     if chrome_sites:
         table("Chrome 网站", chrome_sites)
     table("规则/策略组", by_rule)
+    if by_proc_direct:
+        table("直连进程(TCP,不经 Clash)", by_proc_direct, show_cmd=True)
+        table("全部进程(代理+直连)", by_proc_all, show_cmd=True)
+    else:
+        print("\n(窗口内没有直连 TCP 流量记录:要么都走了代理,要么采样时读不到 /proc 属主)")
     for n, v in iface_delta.items():
         print(f"\n网卡 {n} 窗口内累计:rx {human(v['rx'])} tx {human(v['tx'])}"
               f"  (含直连/非代理流量,所以会比 Clash 侧大)")

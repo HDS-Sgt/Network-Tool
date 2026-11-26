@@ -43,7 +43,20 @@ journalctl --user -u traffic-flow.service -n 20 --no-pager
 
 1. **沙箱内 `systemctl --user` / `crontab` 都不可用**:私有 socket 的对端认证依赖 PID 命名空间,沙箱是独立 PID ns,宿主 systemd 在 `/proc` 找不到该 PID。要装/改单元,得在宿主的桌面终端里做。
 2. **进程名要靠 `sourcePort` 反查**:Clash `/connections` 的 `metadata.process` 默认是空的(缺 `find-process-mode: always`),得拿 `metadata.sourcePort` 去 `ss -tnp` 对应;而 `/proc` 只有在宿主命名空间才看得到别的进程。所以 `flow.py sample` 必须由 systemd --user 跑,手动在沙箱里跑会 `attributed=false`。
-3. **字节级统计不需要 root**:`ss -tin` 打印每条 TCP socket 的 `bytes_sent` / `bytes_received`(纯无特权可读)。但只有 TCP 有,QUIC/UDP 只能看网卡总量。`tcpdump` / `nethogs` 则需要 `CAP_NET_RAW`,本机被拒且 `sudo` 是坏的。
+3. **字节级统计不需要 root**:`ss -tin` 打印每条 TCP socket 的 `bytes_sent` / `bytes_received`(纯无特权可读)。但只有 TCP 有,QUIC/UDP 只能看网卡总量。`tcpdump` / `nethogs` 则需要 `CAP_NET_RAW`,沙箱里被拒(`CapEff=0`);另外沙箱是独立 user namespace,用不了 setuid,所以**在沙箱里** `sudo` 必失败,你自己终端里的 `sudo` 是正常的。
+
+## 直连流量(不经 Clash)也进了统计
+
+`flow.py sample` 除了读 Clash `/connections`,还会跑 `ss -tineH` 拿**所有 TCP socket** 的内核字节计数,把「本地端口不在 Clash `sourcePort` 集合里、对端不是回环、属主不是 clash」的 socket 记成直连,写进同一行的 `direct[]`。`report` 因此多两张表:
+
+- **直连进程(TCP,不经 Clash)**:按进程
+- **全部进程(代理+直连)**:代理与直连合在一起
+
+三个限制:
+
+1. 只有 TCP 有内核字节计数;QUIC/纯 UDP 的直连看不到,只能用网卡 `iface_delta` 兜底。
+2. 归因要读 `/proc/<pid>/fd`,必须在宿主命名空间跑(systemd --user 满足);沙箱里会得到 `(未归因)`。
+3. 第一次见到某个 socket 时按「全生命周期累计」计入,所以重装/重启/清空 `flow_state.json` 后的第一次采样会有一个大尖峰;之后都是差量。Clash 自己的出口 socket 靠「属主进程名含 clash」排除,拿不到属主时可能被重复计入,这种条目会显示为 `(未归因)`。
 
 ## 为什么数据文件不进 git
 
