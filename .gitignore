@@ -1,0 +1,28 @@
+# --- 生成的数据(由 traffic-record.timer / traffic-flow.timer 持续追加,不进 git)---
+# 想连数据一起版本化的话,把下面几行注释掉再 commit;
+# 注意 flows.jsonl 约 7~12 MB/天,append-only 文件每次提交都存整份快照,仓库会涨得很快。
+traffic/flows.jsonl
+traffic/traffic.csv
+traffic/flow_state.json
+traffic/flow_report.json
+
+# --- 仓库根目录的一次性抓取存证(网页/接口响应/外部脚本),只留在磁盘上,不入库 ---
+# 注意开头的 / :只作用于仓库根目录,不影响 traffic/ 子目录里的同名文件。
+/*.html
+/*.json
+/headers.txt
+/connect.sh
+/dsh-proxy.sh
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# --- 运行时杂项 ---
+*.log
+*.tmp
+*.swp
+.DS_Store

@@ -1,0 +1,11 @@
+[Unit]
+Description=每分钟采样 Clash 连接级流量(进程/网站归因)
+
+[Timer]
+OnCalendar=*:*:00
+AccuracySec=5s
+Persistent=false
+Unit=traffic-flow.service
+
+[Install]
+WantedBy=timers.target

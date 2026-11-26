@@ -1,0 +1,6 @@
+[Unit]
+Description=采集 Clash 连接级流量(按进程/网站归因,JSON)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/noilinux/DEEPSEEK-TB/traffic/flow.py sample
