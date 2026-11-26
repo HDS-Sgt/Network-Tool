@@ -18,6 +18,7 @@
 ```bash
 cd traffic
 
+python3 traffic.py sum 2        # 一条命令看全:网卡累计 / 实时速率 / 按天 / Clash,每栏只列前 10 个
 python3 traffic.py daily        # 按天用量
 python3 traffic.py ifaces       # 各网卡自开机累计
 python3 traffic.py rate 3       # 实时速率
