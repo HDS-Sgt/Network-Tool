@@ -1,6 +1,8 @@
-# DEEPSEEK-TB
+# Network-Tool
 
-本机(noilinux@Ubuntu 20.04)的流量观测工作区。**纯本地 git 仓库,没有远端** —— 数据只在这台机器上。
+本机(noilinux@Ubuntu 20.04)的流量观测工作区:无 root 统计网卡用量、按进程/网站归因 Clash 代理流量、并把**直连(不经代理)**的 TCP 流量也算进去。
+
+远端:<https://github.com/HDS-Sgt/Network-Tool>。推上去的只有代码和配置,**采样数据只在本地**(见文末)。
 
 ## 目录
 
