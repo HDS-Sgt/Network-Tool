@@ -10,9 +10,9 @@
 进程名怎么来的(按优先级)
   1) Clash 自报的 metadata.process —— 需要 config.yaml 里加 `find-process-mode: always` 并重启 clash
   2) 拿 metadata.sourcePort 去 `ss -tnp` / `ss -unp` 反查 socket 属主
-     ⚠ 第 2 条只在**宿主命名空间**里有效:用户自己的终端、systemd --user 服务里都能查;
-        AI 的 bash 沙箱是独立 PID namespace,/proc 里看不到宿主进程,会得到 attributed=false
-        (此时 host/网站 级统计照常,只是没有进程名)。
+     ⚠ 第 2 条只在**与被观测进程相同的 PID 命名空间**里有效:普通终端、systemd --user
+        服务里都能查;若在容器 / 独立 PID namespace 里跑,/proc 看不到外面的进程,
+        会得到 attributed=false(此时 host/网站 级统计照常,只是没有进程名)。
 
 环境变量
   CLASH_API  默认 http://127.0.0.1:9090

@@ -6,9 +6,9 @@
   1) /proc/net/dev        —— 内核按网卡的累计字节数(自开机,不含"每天")
   2) Clash 控制端口 9090  —— 实时速率 / 活跃连接(按域名、目标地址)
 
-本机现实(2026-11 实测):沙箱里 sudo 用不了(独立 user ns 不支持 setuid),sysstat 的
-ENABLED="false" 且 /var/log/sysstat 为空 => 没有任何历史流量数据,想要"按天/按月"
-必须先自己采样(record + daily)。
+为什么需要 record + daily:/proc/net/dev 里的计数器是"自开机"的,内核不保存历史,
+sysstat(sar)默认也没开网卡统计。所以想要"按天/按月"的用量,只能自己定期把累计值
+存下来(record),再对相邻快照求正增量(daily)。全程普通用户权限,不需要 root。
 
 用法:
   python3 traffic.py ifaces [LO_ALSO]   # 各网卡累计流量(自开机)

@@ -3,4 +3,4 @@ Description=记录网卡累计流量计数器(为流量历史采样)
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /home/noilinux/DEEPSEEK-TB/traffic/traffic.py record
+ExecStart=/usr/bin/python3 @TRAFFIC_DIR@/traffic.py record

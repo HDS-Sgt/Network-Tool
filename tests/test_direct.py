@@ -18,13 +18,13 @@ class _R:
         self.stdout = out
 
 
-SS = """ESTAB 0 0 192.168.8.17:45678 1.2.3.4:443 timer:(keepalive,9sec,0) uid:1000 ino:111 sk:1
+SS = """ESTAB 0 0 203.0.113.10:45678 1.2.3.4:443 timer:(keepalive,9sec,0) uid:1000 ino:111 sk:1
      cubic wscale:7,7 rto:204 rtt:1.2/0.3 mss:1448 bytes_sent:1000 bytes_received:2000
 ESTAB 0 0 127.0.0.1:40000 127.0.0.1:7890 uid:1000 ino:222 sk:2
      cubic bytes_sent:5 bytes_received:7
-ESTAB 0 0 192.168.8.17:45679 10.0.0.1:80 uid:1000 ino:333 sk:3
+ESTAB 0 0 203.0.113.10:45679 10.0.0.1:80 uid:1000 ino:333 sk:3
      cubic bytes_sent:10 bytes_received:20
-ESTAB 0 0 192.168.8.17:45680 [::ffff:127.0.0.1]:8080 uid:1000 ino:444 sk:4
+ESTAB 0 0 203.0.113.10:45680 [::ffff:127.0.0.1]:8080 uid:1000 ino:444 sk:4
      cubic bytes_sent:1 bytes_received:2
 """
 
@@ -51,7 +51,7 @@ def test_inode_owner():
             fh.write((cmd + "\0").encode())
 
     mk(999, 111, "curl", "curl https://example.com")
-    mk(888, 333, "clash", "clash -d /home/u/clash")
+    mk(888, 333, "clash", "clash -d /opt/clash")
     old = flow.PROC_ROOT
     flow.PROC_ROOT = tmp
     try:
